@@ -4,6 +4,8 @@ A command-line tool that takes CVE IDs and produces **CVSS-BTE scores** — Base
 
 The tool solves the most common failure mode in vulnerability management: treating raw Base scores as final answers. A `9.8 Critical` on an air-gapped internal system with no known exploit is operationally different from the same CVE on an internet-facing server in the CISA KEV catalog. This tool makes that difference visible and documentable.
 
+> 📖 **Full methodology, worked examples, and field guide:** [CVSS v4.0: The Practical Field Guide for Vulnerability Management](https://medium.com/bugbountywriteup/cvss-v4-0-the-practical-field-guide-for-vulnerability-management-5b5a59728456)
+
 ---
 
 ## How It Works
