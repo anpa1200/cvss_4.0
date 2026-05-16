@@ -1,5 +1,9 @@
 # CVSS v4.0 Enrichment Assistant — Heuristic Prioritization Prototype
 
+[![CI](https://github.com/anpa1200/cvss_4.0/actions/workflows/ci.yml/badge.svg)](https://github.com/anpa1200/cvss_4.0/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/anpa1200/cvss_4.0)](https://github.com/anpa1200/cvss_4.0/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > **Scope disclaimer:** This tool produces **heuristic priority estimates**, not authoritative CVSS-BTE scores. Score adjustments use empirical point-delta approximations, not the official CVSS v4.0 lookup tables. For authoritative CVSS-BTE scores use the [FIRST.org CVSS v4.0 calculator](https://www.first.org/cvss/calculator/4-0) with the vector strings this tool produces. This is not official FIRST.org tooling.
 
 A command-line tool that takes CVE IDs and enriches them with live threat intelligence from CISA KEV, EPSS, and NVD. The output is a ranked report with heuristic priority estimates and actionable SLA recommendations — a starting point for triage, not a final answer.
