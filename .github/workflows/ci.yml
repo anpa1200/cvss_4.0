@@ -1,0 +1,27 @@
+name: CI — Syntax and Smoke Test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    name: Python syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check syntax
+        run: python3 -m py_compile cvss_enrichment_tool.py && echo "Syntax OK"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Help flag smoke test
+        run: python3 cvss_enrichment_tool.py --list-profiles
