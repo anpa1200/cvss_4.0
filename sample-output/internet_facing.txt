@@ -1,0 +1,35 @@
+CVSS v4.0 Enrichment Assistant — Heuristic Prioritization Prototype
+  ⚠ Priority estimates are approximate — not authoritative CVSS-BTE scores
+  CVEs:    5
+  Profile: Internet-Facing Services
+  NVD key: none (5 req/30s limit)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+CVE                    CVSS    KEV    EPSS    E:     NVD Sev     → Priority    SLA               Flags
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+CVE-2021-44228          3.1    YES  0.9446   E:A    Critical    → Critical    24–72 hours       v3.1→re-score
+CVE-2023-4966           3.1    YES  0.9435   E:A    Critical    → Critical    24–72 hours       v3.1→re-score
+CVE-2023-34362          3.1    YES  0.9437   E:A    Critical    → Critical    24–72 hours       v3.1→re-score
+CVE-2024-21762          3.1    YES  0.9308   E:A    Critical    → Critical    24–72 hours       v3.1→re-score
+CVE-2025-32433          3.1    YES  0.5031   E:A    Critical    → Critical    24–72 hours       v3.1→re-score
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  NVD Sev    = Severity from NVD base score (before any enrichment)
+  → Priority = Heuristic estimate after E: and profile adjustments
+  ⚠          = EPSS ≥ 0.1: manually verify PoC before treating as E:U final
+  VERIFY PoC = Check ExploitDB/Metasploit/GitHub; upgrade E: if PoC found
+  v3.1→re-score = NVD has v3.1 only; env. adjustment is approximate
+
+  ⚠ Priority column is HEURISTIC — not authoritative CVSS-BTE scoring.
+  Verify important findings at: https://www.first.org/cvss/calculator/4-0
+
+Heuristic summary: 5 Critical  0 High  0 Medium  0 Low
+
+# Command used:
+# python3 cvss_enrichment_tool.py \
+#   --cves CVE-2021-44228 CVE-2023-4966 CVE-2023-34362 CVE-2024-21762 CVE-2025-32433 \
+#   --profile internet_facing
+#
+# Data fetched: 2026-05-16
+# All five CVEs are in CISA KEV (E:A). No network reduction (internet_facing profile).
+# v3.1 source vectors from NVD — verify each at https://www.first.org/cvss/calculator/4-0
