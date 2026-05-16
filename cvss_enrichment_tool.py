@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
 """
-CVSS v4.0 Enrichment Tool
-Fetches Base vectors from NVD, Exploit Maturity from CISA KEV + EPSS,
-applies Environmental profiles, and outputs a prioritized CSV report.
+CVSS v4.0 Enrichment Assistant — Heuristic Prioritization Prototype
+
+PURPOSE
+  Takes CVE IDs and produces enriched prioritization data by pulling live
+  data from CISA KEV, EPSS, and NVD. Outputs a ranked report with heuristic
+  priority estimates and actionable SLA recommendations.
+
+IMPORTANT LIMITATIONS
+  - This tool produces HEURISTIC APPROXIMATIONS, not authoritative CVSS-BTE scores.
+  - Score adjustments use empirical point-delta estimates (E:U −3.0, MAV:A −2.0,
+    MAC:H −1.0), not the official CVSS v4.0 lookup tables.
+  - NVD typically provides CVSS v3.1 vectors for CVEs scored before Nov 2023.
+    Environmental metric adjustments applied to v3.1 base vectors are especially
+    approximate. Re-score using the FIRST.org v4.0 calculator for authoritative results.
+  - EPSS is used as a TRIAGE SIGNAL only. It does not prove PoC availability and
+    does not directly set E:P or E:A. High EPSS flags CVEs for manual verification.
+  - For authoritative CVSS-BTE scoring: https://www.first.org/cvss/calculator/4-0
+  - This is not official FIRST.org tooling.
 
 Usage:
   python3 cvss_enrichment_tool.py --cves CVE-2021-44228 CVE-2023-4966 CVE-2025-32433
@@ -56,16 +71,18 @@ class EnrichmentResult:
     cvss_version: str
     base_vector: str
     base_score: Optional[float]
+    base_severity: str            # Severity from NVD base score (before any enrichment)
     in_kev: bool
     kev_due_date: str
     epss: float
-    exploit_maturity: str
+    epss_verify: bool             # True if EPSS ≥ 0.1 → manual PoC verification recommended
+    exploit_maturity: str         # E:A / E:P / E:U
     exploit_rationale: str
     asset_profile: str
-    bte_vector: str
-    severity_band: str
+    enriched_vector: str          # Base + Threat (+ Environmental if v4.0 base)
+    heuristic_priority: str       # Approximate severity after enrichment (Critical/High/Medium/Low)
     recommended_sla: str
-    notes: str
+    notes: str                    # Warnings, flags, manual action items
 
 
 # ── Built-in asset profiles ───────────────────────────────────────────────────
@@ -123,6 +140,10 @@ def get_epss_scores(cve_ids: List[str], verbose: bool = False) -> dict:
     """
     Fetch EPSS scores from FIRST.org API.
     Returns dict CVE-ID → float probability (0.0–1.0).
+
+    Note: EPSS estimates the probability of exploitation in the next 30 days.
+    It is used here as a triage signal to flag CVEs for manual verification,
+    not as direct evidence for setting E:P or E:A.
     """
     scores = {}
     url = "https://api.first.org/data/v1/epss"
@@ -149,9 +170,9 @@ def get_nvd_vector(cve_id: str, api_key: str = "") -> Tuple[Optional[str], str, 
     Returns (vector_string, cvss_version, base_score).
     Returns (None, "", None) if not found.
 
-    Note: NVD only publishes CVSS v4.0 vectors for CVEs scored after Nov 2023.
-    For older CVEs, the v3.1 vector is returned. Environmental enrichment
-    requires a v4.0 base vector — see the notes field in results.
+    Note: NVD only publishes CVSS v4.0 vectors for CVEs with NVD v4.0 assessment.
+    Many CVEs — including recently published ones — only have CVSS v3.1 in NVD.
+    The CVSS version column in output indicates which version NVD returned.
     """
     url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
     headers = {"apiKey": api_key} if api_key else {}
@@ -189,30 +210,63 @@ def get_nvd_vector(cve_id: str, api_key: str = "") -> Tuple[Optional[str], str, 
 
 def determine_exploit_maturity(
     cve_id: str, kev: dict, epss_scores: dict
-) -> Tuple[str, str]:
+) -> Tuple[str, str, bool]:
     """
-    Determine Exploit Maturity (E) metric and rationale string.
-    Decision order: CISA KEV → EPSS → default E:U.
+    Determine Exploit Maturity (E) metric, rationale string, and verify flag.
+
+    Returns (e_value, rationale, epss_verify)
+      e_value:     "E:A" | "E:P" | "E:U"
+      rationale:   human-readable source explanation
+      epss_verify: True if EPSS ≥ 0.1 → analyst should manually check for PoC
+
+    CVSS v4.0 specification defines:
+      E:A  Attacks in the wild / exploit tooling confirmed
+      E:P  Public proof-of-concept exists, no confirmed attacks
+      E:U  No PoC, no reported attacks, no exploit tooling found
+
+    This function sets E: based on CONFIRMED evidence only:
+      CISA KEV entry → E:A (confirmed active exploitation)
+      Otherwise      → E:U (default — conservative)
+
+    EPSS is a triage signal for manual verification, NOT a source for E:.
+    EPSS ≥ 0.1 sets epss_verify=True to flag for ExploitDB/Metasploit check.
+    If that check finds a public PoC → manually set E:P in your tracking system.
+    If that check finds active exploitation evidence → manually set E:A.
     """
     if cve_id in kev:
         entry = kev[cve_id]
         due = entry.get("dueDate", "N/A")
         name = entry.get("vulnerabilityName", "")
-        return "E:A", f"CISA KEV — due {due} — {name}"
+        return "E:A", f"CISA KEV — confirmed exploitation — due {due} — {name}", False
 
     score = epss_scores.get(cve_id, 0.0)
     if score >= 0.5:
-        return "E:P", f"EPSS={score:.4f} (≥0.5 — high exploitation probability; verify KEV/advisories)"
+        rationale = (
+            f"EPSS={score:.4f} (≥0.5 — HIGH probability). "
+            "Not in KEV. E:U pending manual verification. "
+            "Check ExploitDB/Metasploit/GitHub/vendor advisory."
+        )
+        return "E:U", rationale, True   # epss_verify=True → review needed
     elif score >= 0.1:
-        return "E:P", f"EPSS={score:.4f} (≥0.1 — moderate; verify ExploitDB/Metasploit/GitHub)"
+        rationale = (
+            f"EPSS={score:.4f} (≥0.1 — moderate probability). "
+            "Not in KEV. E:U pending manual verification. "
+            "Check ExploitDB/Metasploit."
+        )
+        return "E:U", rationale, True   # epss_verify=True → review needed
     else:
-        return "E:U", f"EPSS={score:.4f} (<0.1), not in KEV — no current exploitation evidence"
+        return "E:U", f"EPSS={score:.4f} (<0.1) — not in KEV — no current exploitation evidence", False
 
 
-def build_bte_vector(base_vector: str, e_value: str, profile: AssetProfile) -> str:
+def build_enriched_vector(base_vector: str, e_value: str, profile: AssetProfile,
+                          v4_base: bool) -> str:
     """
-    Append Threat and Environmental metrics to a v4.0 Base vector.
+    Append Threat and Environmental metrics to a vector string.
     Only non-X (non-default) values are appended.
+
+    If v4_base is False (v3.1 source vector), Environmental metrics are still
+    appended for heuristic calculation but the result is NOT a valid CVSS v4.0
+    vector — it is used only for heuristic priority estimation.
     """
     parts = [e_value]
     for attr in ["mav","mac","mat","mpr","mui","mvc","mvi","mva","msc","msi","msa","cr","ir","ar"]:
@@ -222,41 +276,75 @@ def build_bte_vector(base_vector: str, e_value: str, profile: AssetProfile) -> s
     return f"{base_vector}/{'/'.join(parts)}"
 
 
-def severity_band(bte_vector: str, base_score: Optional[float]) -> Tuple[str, str]:
+def nvd_severity(score: Optional[float]) -> str:
+    """Convert NVD base score to severity label."""
+    if score is None:
+        return "Unknown"
+    if score >= 9.0:  return "Critical"
+    if score >= 7.0:  return "High"
+    if score >= 4.0:  return "Medium"
+    if score > 0.0:   return "Low"
+    return "None"
+
+
+def heuristic_priority(enriched_vector: str, base_score: Optional[float]) -> Tuple[str, str]:
     """
-    Approximate severity band and SLA from score.
-    Uses base_score as proxy since we can't compute v4.0 score without the full lookup table.
-    For v4.0 vectors, direct calculation via FIRST.org API is recommended.
+    Approximate operational priority and SLA from base score + enrichment heuristics.
+
+    WARNING: These are EMPIRICAL APPROXIMATIONS.
+    Actual CVSS v4.0 scoring uses lookup tables, not formulas.
+    Use the FIRST.org calculator for authoritative scores:
+      https://www.first.org/cvss/calculator/4-0
+
+    Empirical adjustments (approximate ranges from FIRST.org calculator observations):
+      E:U  → −2.5 to −3.5 pts (using −3.0)
+      E:P  → −1.0 to −1.5 pts (using −1.2)
+      MAV:A → −1.5 to −2.5 pts (using −2.0)
+      MAV:L → −2.5 to −3.5 pts (using −3.0)
+      MAC:H → −0.5 to −1.5 pts (using −1.0)
+      MSC:N/MSI:N/MSA:N → −0.5 to −1.5 pts (using −0.8 combined)
+      CR:L/IR:L/AR:L → −0.3 to −0.8 pts per metric (using −0.3)
+      CR:H/IR:H/AR:H → +0.3 to +0.8 pts per metric (using +0.3)
     """
-    # NVD base score is our best approximation without a local v4.0 calculator
     score = base_score or 0.0
 
-    # Partial adjustment: E:U in vector typically reduces by 2.5–3.5 pts
-    if "/E:U/" in bte_vector or bte_vector.endswith("/E:U"):
+    if "/E:U/" in enriched_vector or enriched_vector.endswith("/E:U"):
         score = max(0.0, score - 3.0)
-    elif "/E:P/" in bte_vector or bte_vector.endswith("/E:P"):
+    elif "/E:P/" in enriched_vector or enriched_vector.endswith("/E:P"):
         score = max(0.0, score - 1.2)
 
-    # MAV:A typically reduces by 1.5–2.5 pts
-    if "/MAV:A/" in bte_vector or bte_vector.endswith("/MAV:A"):
+    if "/MAV:A/" in enriched_vector or enriched_vector.endswith("/MAV:A"):
         score = max(0.0, score - 2.0)
-    elif "/MAV:L/" in bte_vector or bte_vector.endswith("/MAV:L"):
+    elif "/MAV:L/" in enriched_vector or enriched_vector.endswith("/MAV:L"):
         score = max(0.0, score - 3.0)
+    elif "/MAV:P/" in enriched_vector or enriched_vector.endswith("/MAV:P"):
+        score = max(0.0, score - 4.0)
 
-    # MAC:H typically reduces by 0.5–1.5 pts
-    if "/MAC:H/" in bte_vector or bte_vector.endswith("/MAC:H"):
+    if "/MAC:H/" in enriched_vector or enriched_vector.endswith("/MAC:H"):
         score = max(0.0, score - 1.0)
 
-    if score >= 9.0:
-        return "Critical", "24–72 hours"
-    elif score >= 7.0:
-        return "High", "30 days"
-    elif score >= 4.0:
-        return "Medium", "90 days"
-    elif score > 0.0:
-        return "Low", "Next release cycle"
-    else:
-        return "None", "Informational"
+    # Subsequent system impact reduction
+    if "/MSC:N/" in enriched_vector or enriched_vector.endswith("/MSC:N"):
+        score = max(0.0, score - 0.4)
+    if "/MSI:N/" in enriched_vector or enriched_vector.endswith("/MSI:N"):
+        score = max(0.0, score - 0.2)
+    if "/MSA:N/" in enriched_vector or enriched_vector.endswith("/MSA:N"):
+        score = max(0.0, score - 0.2)
+
+    # Security requirements
+    for metric in ["CR", "IR", "AR"]:
+        if f"/{metric}:H/" in enriched_vector or enriched_vector.endswith(f"/{metric}:H"):
+            score = min(10.0, score + 0.3)
+        elif f"/{metric}:L/" in enriched_vector or enriched_vector.endswith(f"/{metric}:L"):
+            score = max(0.0, score - 0.3)
+
+    score = round(score, 1)
+
+    if score >= 9.0:   return "Critical", "24–72 hours"
+    elif score >= 7.0: return "High",     "30 days"
+    elif score >= 4.0: return "Medium",   "90 days"
+    elif score > 0.0:  return "Low",      "Next release"
+    else:              return "None",     "Informational"
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
@@ -283,42 +371,55 @@ def enrich_cves(
         time.sleep(0.7)  # NVD free-tier: 5 req/30 s
 
         kev_entry = kev.get(cve_id, {})
-        e_value, e_rationale = determine_exploit_maturity(cve_id, kev, epss)
+        e_value, e_rationale, epss_verify = determine_exploit_maturity(cve_id, kev, epss)
 
-        notes = ""
+        notes_parts = []
+
         if not base_vector:
-            bte_vector = "N/A — vector not found in NVD"
-            band, sla = "UNKNOWN", "Check manually"
-            notes = "No CVSS vector in NVD. Score manually via FIRST.org calculator."
-        elif cvss_ver != "4.0":
-            # v3.1 vector: threat-only enrichment, no environmental metrics
-            bte_vector = f"{base_vector}/{e_value}"
-            band, sla = severity_band(bte_vector, base_score)
-            notes = (
-                f"NVD only has CVSS {cvss_ver} vector. "
-                "Environmental metrics (MAV, MSC, CR, etc.) require a v4.0 base vector. "
-                "Re-score manually at https://www.first.org/cvss/calculator/4-0 "
-                "then rerun with the v4.0 vector."
+            enriched_vector = "N/A — vector not found in NVD"
+            priority_band, sla = "UNKNOWN", "Check manually"
+            base_sev = "Unknown"
+            notes_parts.append(
+                "No CVSS vector in NVD. Score manually via FIRST.org calculator."
             )
         else:
-            bte_vector = build_bte_vector(base_vector, e_value, profile)
-            band, sla = severity_band(bte_vector, base_score)
+            base_sev = nvd_severity(base_score)
+            v4_base = (cvss_ver == "4.0")
+
+            # Build enriched vector (always include environmental metrics for heuristic)
+            enriched_vector = build_enriched_vector(base_vector, e_value, profile, v4_base)
+            priority_band, sla = heuristic_priority(enriched_vector, base_score)
+
+            if not v4_base:
+                notes_parts.append(
+                    f"NVD has CVSS {cvss_ver} vector only. "
+                    "Environmental adjustment applied as heuristic. "
+                    "Re-score at https://www.first.org/cvss/calculator/4-0"
+                )
+
+        if epss_verify:
+            notes_parts.append(
+                f"VERIFY: EPSS={epss.get(cve_id, 0.0):.3f} — "
+                "check ExploitDB/Metasploit/GitHub; upgrade E: if PoC/exploit confirmed"
+            )
 
         results.append(EnrichmentResult(
             cve=cve_id,
             cvss_version=cvss_ver or "NOT_FOUND",
             base_vector=base_vector or "",
             base_score=base_score,
+            base_severity=base_sev,
             in_kev=bool(kev_entry),
             kev_due_date=kev_entry.get("dueDate", ""),
             epss=epss.get(cve_id, 0.0),
+            epss_verify=epss_verify,
             exploit_maturity=e_value,
             exploit_rationale=e_rationale,
             asset_profile=profile.name,
-            bte_vector=bte_vector,
-            severity_band=band,
+            enriched_vector=enriched_vector,
+            heuristic_priority=priority_band,
             recommended_sla=sla,
-            notes=notes,
+            notes=" | ".join(notes_parts),
         ))
 
     return results
@@ -327,22 +428,56 @@ def enrich_cves(
 # ── Output helpers ────────────────────────────────────────────────────────────
 
 def print_table(results: List[EnrichmentResult]) -> None:
-    """Print a formatted summary table to stdout."""
-    sep = "-" * 110
-    header = f"{'CVE':<20} {'CVSS':>5}  {'KEV':>4}  {'EPSS':>7}  {'E':<5}  {'Severity':<10}  {'SLA':<20}  Notes"
+    """
+    Print a formatted summary table to stdout.
+
+    Columns:
+      CVE         — CVE identifier
+      CVSS        — CVSS version from NVD (3.1 or 4.0)
+      KEV         — In CISA KEV? (YES = confirmed active exploitation)
+      EPSS        — EPSS probability (0–1); ⚠ = verify PoC manually
+      E:          — Exploit Maturity assigned (A/P/U)
+      NVD Sev     — Original NVD Base severity (before enrichment)
+      Priority    — Heuristic priority after E: and profile adjustment
+      SLA         — Recommended remediation timeline
+      Flags       — Action items (VERIFY PoC, v3.1 re-score, etc.)
+    """
+    sep = "─" * 120
+    header = (
+        f"{'CVE':<22} {'CVSS':>5}  {'KEV':>4}  {'EPSS':>7}  {'E:':<5}  "
+        f"{'NVD Sev':<10}  {'→ Priority':<12}  {'SLA':<16}  Flags"
+    )
     print()
     print(sep)
     print(header)
     print(sep)
     for r in results:
-        kev_flag = "YES" if r.in_kev else "no"
-        epss_str = f"{r.epss:.4f}" if r.epss else "N/A"
-        notes_short = r.notes[:40] + "…" if len(r.notes) > 40 else r.notes
+        kev_flag = "YES" if r.in_kev else " no"
+        epss_str = f"{r.epss:.4f}" if r.epss else "  N/A"
+        epss_warn = "⚠" if r.epss_verify else " "
+        priority_arrow = f"→ {r.heuristic_priority}"
+        flags = []
+        if r.epss_verify:
+            flags.append("VERIFY PoC")
+        if "v3.1" in r.notes or "3.1 vector" in r.notes:
+            flags.append("v3.1→re-score")
+        flags_str = " | ".join(flags)
+
         print(
-            f"{r.cve:<20} {r.cvss_version:>5}  {kev_flag:>4}  {epss_str:>7}  "
-            f"{r.exploit_maturity:<5}  {r.severity_band:<10}  {r.recommended_sla:<20}  {notes_short}"
+            f"{r.cve:<22} {r.cvss_version:>5}  {kev_flag:>4}  {epss_warn}{epss_str}  "
+            f"{r.exploit_maturity:<5}  {r.base_severity:<10}  {priority_arrow:<12}  "
+            f"{r.recommended_sla:<16}  {flags_str}"
         )
     print(sep)
+    print()
+    print("  NVD Sev    = Severity from NVD base score (before any enrichment)")
+    print("  → Priority = Heuristic estimate after E: and profile adjustments")
+    print("  ⚠          = EPSS ≥ 0.1: manually verify PoC before treating as E:U final")
+    print("  VERIFY PoC = Check ExploitDB/Metasploit/GitHub; upgrade E: if PoC found")
+    print("  v3.1→re-score = NVD has v3.1 only; env. adjustment is approximate")
+    print()
+    print("  ⚠ Priority column is HEURISTIC — not authoritative CVSS-BTE scoring.")
+    print("  Verify important findings at: https://www.first.org/cvss/calculator/4-0")
     print()
 
 
@@ -371,7 +506,12 @@ def write_json(results: List[EnrichmentResult], output_path: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="CVSS v4.0 Enrichment Tool — fetch, enrich, and prioritize CVEs",
+        description=(
+            "CVSS v4.0 Enrichment Assistant — Heuristic Prioritization Prototype\n"
+            "Fetches CVE data from NVD, CISA KEV, and EPSS; applies asset profiles;\n"
+            "outputs heuristic priority estimates. Not a CVSS-BTE calculator.\n"
+            "For authoritative scores: https://www.first.org/cvss/calculator/4-0"
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -397,7 +537,7 @@ Built-in profiles:
                         choices=list(BUILT_IN_PROFILES.keys()),
                         help="Asset profile for environmental metrics (default: internal_vlan)")
     parser.add_argument("--output", metavar="PATH",
-                        help="Output CSV file path (default: print to stdout only)")
+                        help="Output CSV file path")
     parser.add_argument("--json", metavar="PATH",
                         help="Also write JSON output to this path")
     parser.add_argument("--apikey", default="", metavar="KEY",
@@ -450,10 +590,13 @@ def main() -> None:
     cve_ids = [c for c in cve_ids if not (c in seen or seen.add(c))]
 
     profile = BUILT_IN_PROFILES[args.profile]
-    print(f"\nCVSS v4.0 Enrichment Tool")
+    print()
+    print("CVSS v4.0 Enrichment Assistant — Heuristic Prioritization Prototype")
+    print("  ⚠ Priority estimates are approximate — not authoritative CVSS-BTE scores")
     print(f"  CVEs:    {len(cve_ids)}")
     print(f"  Profile: {profile.name}")
-    print(f"  NVD key: {'provided' if args.apikey else 'none (5 req/30s limit)'}\n")
+    print(f"  NVD key: {'provided' if args.apikey else 'none (5 req/30s limit)'}")
+    print()
 
     results = enrich_cves(cve_ids, profile, args.apikey, args.verbose)
 
@@ -465,15 +608,15 @@ def main() -> None:
         write_json(results, args.json)
 
     # Exit summary
-    critical = sum(1 for r in results if r.severity_band == "Critical")
-    high     = sum(1 for r in results if r.severity_band == "High")
-    medium   = sum(1 for r in results if r.severity_band == "Medium")
-    low      = sum(1 for r in results if r.severity_band in ("Low", "None"))
-    warned   = sum(1 for r in results if r.notes)
+    critical  = sum(1 for r in results if r.heuristic_priority == "Critical")
+    high      = sum(1 for r in results if r.heuristic_priority == "High")
+    medium    = sum(1 for r in results if r.heuristic_priority == "Medium")
+    low       = sum(1 for r in results if r.heuristic_priority in ("Low", "None"))
+    to_verify = sum(1 for r in results if r.epss_verify)
 
-    print(f"Summary: {critical} Critical  {high} High  {medium} Medium  {low} Low")
-    if warned:
-        print(f"Warnings: {warned} CVE(s) have notes — check the Notes column")
+    print(f"Heuristic summary: {critical} Critical  {high} High  {medium} Medium  {low} Low")
+    if to_verify:
+        print(f"Manual verification needed: {to_verify} CVE(s) with EPSS ≥ 0.1 — check ExploitDB/Metasploit")
     print()
 
 
